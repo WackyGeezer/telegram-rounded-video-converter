@@ -21,7 +21,6 @@ if not BOT_TOKEN:
     logger.error("توکن ربات (BOT_TOKEN) تنظیم نشده است!")
 
 # لیست کاربران مجاز (آیدی‌های عددی یا یوزرنیم‌ها جدا شده با کاما)
-# مثال: "123456789, 987654321, @username"
 ALLOWED_USERS_RAW = os.getenv("ALLOWED_USERS", "").strip()
 
 bot = telebot.TeleBot(BOT_TOKEN)
@@ -30,7 +29,6 @@ bot = telebot.TeleBot(BOT_TOKEN)
 def is_user_allowed(user):
     """بررسی می‌کند آیا کاربر در لیست مجاز قرار دارد یا خیر"""
     if not ALLOWED_USERS_RAW:
-        # اگر لیست خالی بود، همه مجاز هستند
         return True
 
     allowed_list = [x.strip().lower().lstrip('@') for x in ALLOWED_USERS_RAW.split(",") if x.strip()]
@@ -107,39 +105,30 @@ def show_id(message):
         parse_mode="Markdown"
     )
 
-# ۱. هندلر تبدیل ویدیو به ویدیوی دایره‌ای
 @bot.message_handler(content_types=['video'])
 def handle_video(message):
     if not check_permission(message):
         return
-
     process_video_conversion(message, message.video.file_id)
 
-# ۲. هندلر تبدیل صوت / آهنگ به ویس تلگرام
 @bot.message_handler(content_types=['audio'])
 def handle_audio(message):
     if not check_permission(message):
         return
-
     process_audio_to_voice(message, message.audio.file_id)
 
-# ۳. هندلر تبدیل ویس به فایل صوتی MP3
 @bot.message_handler(content_types=['voice'])
 def handle_voice(message):
     if not check_permission(message):
         return
-
     process_voice_to_audio(message, message.voice.file_id)
 
-# ۴. هندلر تبدیل ویدیوی گرد به ویدیوی معمولی
 @bot.message_handler(content_types=['video_note'])
 def handle_video_note(message):
     if not check_permission(message):
         return
-
     process_videonote_to_video(message, message.video_note.file_id)
 
-# ۵. هندلر فایل‌های Document (تشخیص ویدیو یا صوت ارسال شده به صورت فایل)
 @bot.message_handler(content_types=['document'])
 def handle_document(message):
     if not check_permission(message):
@@ -148,10 +137,8 @@ def handle_document(message):
     mime = (message.document.mime_type or "").lower()
     name = (message.document.file_name or "").lower()
 
-    # اگر ویدیو است
     if mime.startswith('video/') or name.endswith(('.mp4', '.mov', '.mkv', '.avi', '.webm', '.3gp')):
         process_video_conversion(message, message.document.file_id)
-    # اگر صوت است
     elif mime.startswith('audio/') or name.endswith(('.mp3', '.wav', '.m4a', '.aac', '.flac', '.ogg', '.opus', '.wma', '.amr')):
         process_audio_to_voice(message, message.document.file_id)
     else:
@@ -177,7 +164,6 @@ def process_video_conversion(message, file_id):
 
         bot.edit_message_text("⚙️ در حال فشرده‌سازی و تبدیل به دایره‌ای...", message.chat.id, status_msg.message_id)
 
-        # برش ۱:۱ مرکز ویدیو و ابعاد ۳۸۴x۳۸۴ استاندارد تلگرام
         cmd = [
             "ffmpeg", "-y", "-i", input_file,
             "-vf", "crop='min(iw,ih)':'min(iw,ih)',scale=384:384",
@@ -214,7 +200,7 @@ def process_video_conversion(message, file_id):
             except: pass
 
 def process_audio_to_voice(message, file_id):
-    """تبدیل فایل صوتی / موزیک به ویس تلگرام (OGG Opus)"""
+    """تبدیل فایل صوتی / موزیک به ویس معتبر و کامپتیبل تلگرام (OGG Opus)"""
     status_msg = bot.reply_to(message, "⏳ در حال دانلود و آماده‌سازی صوت...")
     req_id = uuid.uuid4().hex[:8]
     input_file = f"in_aud_{req_id}.dat"
@@ -232,23 +218,55 @@ def process_audio_to_voice(message, file_id):
 
         bot.edit_message_text("⚙️ در حال تبدیل به ویس تلگرام (Voice Note)...", message.chat.id, status_msg.message_id)
 
-        # تبدیل فایل صوتی به فرمت استاندارد ویس تلگرام (Opus OGG)
+        # فرمت کاملاً سازگار با پلیر ویس تلگرام:
+        # ۱. -vn: حذف اجباری ویدیو/کاور تصویر که باعث خرابی هدر OGG می‌شود
+        # ۲. -af asetpts=N/SR/TB: نرمال‌سازی تایم‌استمپ بسته‌ها برای رفع باگ عدم پخش و ثانیه شمار 0:00
+        # ۳. -c:a libopus: کدک اختصاصی ویس
+        # ۴. -b:a 48k: بیت‌ریت استاندارد
+        # ۵. -ar 48000: فرکانس استاندارد اپوس
+        # ۶. -ac 1: الزامی! تبدیل به مونو (تلگرام ویس استریو را پخش نمی‌کند)
+        # ۷. -application voip: حالت مخصوص انتقال صدا در تلگرام
         cmd = [
             "ffmpeg", "-y", "-i", input_file,
+            "-vn",
+            "-af", "asetpts=N/SR/TB",
             "-c:a", "libopus",
-            "-b:a", "64k",
+            "-b:a", "48k",
             "-vbr", "on",
+            "-compression_level", "10",
             "-ar", "48000",
+            "-ac", "1",
+            "-application", "voip",
             output_file
         ]
         
         proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         if proc.returncode != 0:
             logger.error(f"خطای ffmpeg: {proc.stderr.decode('utf-8', errors='ignore')}")
-            raise Exception("خطا در تبدیل فایل صوتی")
+            raise Exception("خطا در تبدیل فایل صوتی با ffmpeg")
+
+        # محاسبه طول صوت بر حسب ثانیه و پاس دادن آن به تلگرام
+        duration_sec = None
+        try:
+            probe_cmd = [
+                "ffprobe", "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                output_file
+            ]
+            probe_res = subprocess.run(probe_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            if probe_res.stdout.strip():
+                duration_sec = int(round(float(probe_res.stdout.strip())))
+        except Exception as pe:
+            logger.warning(f"عدم امکان خواندن مدت زمان ویس: {pe}")
 
         with open(output_file, 'rb') as voice_file:
-            bot.send_voice(message.chat.id, voice_file, reply_to_message_id=message.message_id)
+            bot.send_voice(
+                message.chat.id,
+                voice_file,
+                duration=duration_sec,
+                reply_to_message_id=message.message_id
+            )
 
         bot.delete_message(message.chat.id, status_msg.message_id)
 
