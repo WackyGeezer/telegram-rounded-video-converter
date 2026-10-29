@@ -8,21 +8,17 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 import static_ffmpeg
 import telebot
 
-# پیکربندی لاگ‌ها
+# پیکربندی سیستم لاگ
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO
 )
 logger = logging.getLogger("TelesBot")
 
-# افزودن خودکار ffmpeg به متغیرهای سیستمی PATH
-logger.info("در حال تنظیم ffmpeg...")
-static_ffmpeg.add_paths()
-
-# خواندن توکن از محیط یا متغیر پیش‌فرض
+# خواندن توکن از محیط سیستم
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 if not BOT_TOKEN:
-    logger.warning("توکن ربات (BOT_TOKEN) تنظیم نشده است!")
+    logger.error("توکن ربات (BOT_TOKEN) تنظیم نشده است!")
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
@@ -39,16 +35,19 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def log_message(self, format, *args):
-        # جلوگیری از شلوغی لاگ‌ها توسط پینگ‌های مکرر
+        # جلوگیری از شلوغ شدن کنسول با پینگ‌های هلث‌چک
         return
 
 def run_health_server():
     port = int(os.getenv("PORT", 10000))
     logger.info(f"وب‌سرور هلث‌چک روی پورت {port} شروع به کار کرد.")
-    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
-    server.serve_forever()
+    try:
+        server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+        server.serve_forever()
+    except Exception as e:
+        logger.error(f"خطا در وب‌سرور: {e}")
 
-# ----------------- هندلرهای تلگرام -----------------
+# ----------------- هندلرهای ربات تلگرام -----------------
 @bot.message_handler(commands=['start', 'help'])
 def send_welcome(message):
     welcome_text = (
@@ -60,7 +59,6 @@ def send_welcome(message):
 
 @bot.message_handler(content_types=['video', 'document'])
 def handle_video(message):
-    # بررسی نوع فایل
     file_id = None
     if message.content_type == 'video':
         file_id = message.video.file_id
@@ -75,16 +73,15 @@ def handle_video(message):
 
     status_msg = bot.reply_to(message, "⏳ در حال دانلود و آماده‌سازی ویدیو...")
 
-    # نام‌گذاری یکتا برای جلوگیری از تداخل درخواست‌های همزمان
     req_id = uuid.uuid4().hex[:8]
     input_file = f"temp_in_{req_id}.mp4"
     output_file = f"temp_out_{req_id}.mp4"
 
     try:
-        # ۱. دانلود فایل ویدیو
+        # ۱. بررسی حجم فایل و دانلود
         file_info = bot.get_file(file_id)
         if file_info.file_size and file_info.file_size > 20 * 1024 * 1024:
-            bot.edit_message_text("⚠️ حجم فایل بیش از ۲۰ مگابایت است. ربات‌های تلگرام به دلیل محدودیت تلگرام فقط تا ۲۰ مگابایت فایل مستقیم دریافت می‌کنند.", message.chat.id, status_msg.message_id)
+            bot.edit_message_text("⚠️ حجم فایل بیش از ۲۰ مگابایت است. ربات‌های تلگرام به دلیل محدودیت مستقیم فقط تا ۲۰ مگابایت فایل دریافت می‌کنند.", message.chat.id, status_msg.message_id)
             return
 
         downloaded_bytes = bot.download_file(file_info.file_path)
@@ -93,7 +90,7 @@ def handle_video(message):
 
         bot.edit_message_text("⚙️ در حال فشرده‌سازی و تبدیل به دایره‌ای...", message.chat.id, status_msg.message_id)
 
-        # ۲. تبدیل ویدیو با ffmpeg به نسبت ۱:۱ و ابعاد ۳۸۴x۳۸۴ استاندارد تلگرام
+        # ۲. تبدیل با ffmpeg (برش ۱:۱ مرکز ویدیو و ابعاد ۳۸۴x۳۸۴)
         cmd = [
             "ffmpeg", "-y", "-i", input_file,
             "-vf", "crop='min(iw,ih)':'min(iw,ih)',scale=384:384",
@@ -111,20 +108,19 @@ def handle_video(message):
         proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         if proc.returncode != 0:
             logger.error(f"خطای ffmpeg: {proc.stderr.decode('utf-8', errors='ignore')}")
-            raise Exception("خطا در پردازش فایل ویدیویی با ffmpeg")
+            raise Exception("خطا در پردازش ویدیو")
 
-        # ۳. ارسال به صورت Video Note (تلس تلگرام)
+        # ۳. ارسال به تلگرام به عنوان تلس (Video Note)
         with open(output_file, 'rb') as video_note:
             bot.send_video_note(message.chat.id, video_note, reply_to_message_id=message.message_id)
 
         bot.delete_message(message.chat.id, status_msg.message_id)
 
     except Exception as e:
-        logger.exception("خطا در پردازش ویدیو")
+        logger.exception("خطا در فرآیند تبدیل")
         bot.edit_message_text(f"❌ متأسفانه خطایی رخ داد: {str(e)}", message.chat.id, status_msg.message_id)
 
     finally:
-        # حذف فایل‌های موقت
         if os.path.exists(input_file):
             try: os.remove(input_file)
             except: pass
@@ -134,13 +130,25 @@ def handle_video(message):
 
 # ----------------- تابع اصلی اجرای برنامه -----------------
 def main():
-    if not BOT_TOKEN:
-        logger.error("لطفاً توکن ربات را در متغیر محیطی BOT_TOKEN قرار دهید.")
-        sys.exit(1)
-
-    # راه‌اندازی سرور هلث‌چک در یک رشته (Thread) جداگانه
+    # ۱. راه‌اندازی سریع وب‌سرور هلث‌چک برای موفقیت کامل Render
     health_thread = threading.Thread(target=run_health_server, daemon=True)
     health_thread.start()
+
+    # ۲. آماده‌سازی ffmpeg
+    logger.info("در حال بارگذاری و تنظیم ffmpeg...")
+    static_ffmpeg.add_paths()
+
+    # ۳. بررسی توکن
+    if not BOT_TOKEN:
+        logger.error("متغیر BOT_TOKEN خالی است!")
+        sys.exit(1)
+
+    # ۴. حذف وبهوک‌های قبلی در صورت وجود برای جلوگیری از ارور ۴۰۹ تلگرام
+    try:
+        logger.info("بررسی و حذف وب‌هوک‌های قبلی...")
+        bot.delete_webhook(drop_pending_updates=True)
+    except Exception as e:
+        logger.warning(f"عدم امکان حذف وبهوک: {e}")
 
     logger.info("ربات تلگرام با موفقیت روشن شد و در حال پولینگ است...")
     bot.infinity_polling(skip_pending=True)
